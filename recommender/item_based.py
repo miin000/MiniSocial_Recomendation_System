@@ -188,32 +188,48 @@ async def train_and_save() -> dict:
 async def get_recommendations_for_user(user_id: str) -> dict:
     """
     Lấy gợi ý từ cache user_recommendations.
+    Loại bỏ các bài user đã xem/tương tác để tránh lặp lại.
     Nếu không có hoặc đã hết hạn → trả về popular posts (cold start).
     """
     db = get_db()
     now = datetime.utcnow()
 
+    # Lấy danh sách post_id user đã tương tác (xem, like, comment, share...)
+    interacted_cursor = db["user_interactions"].find(
+        {"user_id": user_id},
+        {"_id": 0, "post_id": 1}
+    )
+    interacted_docs = await interacted_cursor.to_list(length=None)
+    already_seen_ids = {doc["post_id"] for doc in interacted_docs}
+
     recs = await db["user_recommendations"].find(
         {"user_id": user_id, "expires_at": {"$gt": now}},
         {"_id": 0, "post_id": 1, "score": 1, "reason_tag": 1, "reason_text": 1, "rank": 1}
-    ).sort("rank", 1).to_list(length=TOP_N_RECOMMENDATIONS)
+    ).sort("rank", 1).to_list(length=TOP_N_RECOMMENDATIONS * 2)  # lấy nhiều hơn để bù sau khi lọc
 
     if recs:
+        # Lọc bỏ bài đã xem
+        filtered_recs = [r for r in recs if r["post_id"] not in already_seen_ids]
+        # Re-rank
+        for i, r in enumerate(filtered_recs, start=1):
+            r["rank"] = i
+        filtered_recs = filtered_recs[:TOP_N_RECOMMENDATIONS]
         return {
             "user_id": user_id,
-            "recommendations": recs,
+            "recommendations": filtered_recs,
             "generated_at": now,
             "source": "collaborative",
         }
 
-    # Cold start: trả về popular posts
-    popular = await load_popular_post_ids(TOP_N_RECOMMENDATIONS)
+    # Cold start: trả về popular posts chưa xem
+    popular = await load_popular_post_ids(TOP_N_RECOMMENDATIONS * 2)
+    filtered_popular = [pid for pid in popular if pid not in already_seen_ids][:TOP_N_RECOMMENDATIONS]
     return {
         "user_id": user_id,
         "recommendations": [
             {"post_id": pid, "score": 0.0, "reason_tag": None,
              "reason_text": "Bài viết phổ biến", "rank": i + 1}
-            for i, pid in enumerate(popular)
+            for i, pid in enumerate(filtered_popular)
         ],
         "generated_at": now,
         "source": "popular",
