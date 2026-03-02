@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: minisocial-ml-server
+    runtime: python
+    region: singapore   # gần Việt Nam nhất
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+
+    # Health check — Render dùng để biết server đã sẵn sàng
+    healthCheckPath: /health
+
+    envVars:
+      - key: MONGODB_URL
+        sync: false           # điền thủ công trên Render dashboard (bảo mật)
+      - key: MONGODB_DB
+        value: minisocial
+      - key: RETRAIN_CRON
+        value: "0 */6 * * *"
+      - key: TOP_N_RECOMMENDATIONS
+        value: "20"
+      - key: TOP_N_SIMILAR
+        value: "10"
+      - key: MIN_INTERACTIONS
+        value: "2"
+      - key: PYTHON_VERSION
+        value: "3.12.0"
