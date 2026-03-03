@@ -88,8 +88,14 @@ async def load_user_tag_preferences(user_id: str) -> list[str]:
     if not interactions:
         return []
 
-    post_ids = [i["post_id"] for i in interactions]
-    weight_map = {i["post_id"]: i["weight"] for i in interactions}
+    # Sum weights for same post across multiple interaction types
+    # (e.g. view=1 + like=2 → 3, instead of overwriting with last value)
+    weight_map: dict[str, float] = {}
+    for i in interactions:
+        pid = i["post_id"]
+        weight_map[pid] = weight_map.get(pid, 0.0) + float(i["weight"])
+
+    post_ids = list(weight_map.keys())
 
     # Convert string IDs → ObjectId vì posts._id lưu dạng ObjectId
     def _to_oid(s: str):

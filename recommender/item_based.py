@@ -129,7 +129,11 @@ async def train_and_save() -> dict:
         interacted_ids  = set(user_row[user_row > 0].index)
 
         # Điểm tổng cho mỗi post chưa tương tác
+        # Also track best contributing source post per candidate
         candidate_scores: dict[str, float] = {}
+        candidate_best_source: dict[str, str] = {}   # candidate_pid → interacted_pid with highest contribution
+        candidate_best_contrib: dict[str, float] = {}  # candidate_pid → highest contribution so far
+
         for interacted_pid in interacted_ids:
             if interacted_pid not in sim_df.index:
                 continue
@@ -138,10 +142,15 @@ async def train_and_save() -> dict:
             for candidate_pid, sim_score in sim_row.items():
                 if candidate_pid in interacted_ids:
                     continue
+                contrib = sim_score * w
                 candidate_scores[candidate_pid] = (
                     candidate_scores.get(candidate_pid, 0.0)
-                    + sim_score * w
+                    + contrib
                 )
+                # Track best source for reason_text
+                if contrib > candidate_best_contrib.get(candidate_pid, -1):
+                    candidate_best_contrib[candidate_pid] = contrib
+                    candidate_best_source[candidate_pid] = interacted_pid
 
         if not candidate_scores:
             continue
@@ -151,12 +160,24 @@ async def train_and_save() -> dict:
             candidate_scores.items(), key=lambda x: x[1], reverse=True
         )[:TOP_N_RECOMMENDATIONS]
 
-        # Tính lý do gợi ý (tag nổi bật nhất)
+        # Tính lý do gợi ý theo từng bài: tag nổi bật của bài tương tác đóng góp nhiều nhất
         user_top_tags = await load_user_tag_preferences(user_id)
-        reason_tag  = f"#{user_top_tags[0].capitalize()}" if user_top_tags else None
-        reason_text = f"Vì bạn thích {user_top_tags[0].capitalize()}" if user_top_tags else "Dành cho bạn"
 
         for rank, (pid, score) in enumerate(top_candidates, start=1):
+            # Per-recommendation reason: find the top tag of the best-contributing source post
+            source_pid = candidate_best_source.get(pid)
+            if source_pid and source_pid in post_tags and post_tags[source_pid]:
+                # Use the first tag of the source post as reason
+                tag_slug = post_tags[source_pid][0]
+                reason_tag  = f"#{tag_slug.capitalize()}"
+                reason_text = f"Vì bạn thích {tag_slug.capitalize()}"
+            elif user_top_tags:
+                # Fallback to user's overall top tag
+                reason_tag  = f"#{user_top_tags[0].capitalize()}"
+                reason_text = f"Vì bạn thích {user_top_tags[0].capitalize()}"
+            else:
+                reason_tag  = None
+                reason_text = "Dành cho bạn"
             rec_docs.append({
                 "user_id":     user_id,
                 "post_id":     pid,
