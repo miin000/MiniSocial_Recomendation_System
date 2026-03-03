@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
@@ -90,9 +91,18 @@ async def load_user_tag_preferences(user_id: str) -> list[str]:
     post_ids = [i["post_id"] for i in interactions]
     weight_map = {i["post_id"]: i["weight"] for i in interactions}
 
+    # Convert string IDs → ObjectId vì posts._id lưu dạng ObjectId
+    def _to_oid(s: str):
+        try:
+            return ObjectId(s)
+        except Exception:
+            return s
+
+    post_oids = [_to_oid(pid) for pid in post_ids]
+
     # Lấy tags của các bài đó
     cursor2 = db["posts"].find(
-        {"_id": {"$in": post_ids}},
+        {"_id": {"$in": post_oids}},
         {"_id": 1, "tags": 1}
     )
     posts = await cursor2.to_list(length=None)
