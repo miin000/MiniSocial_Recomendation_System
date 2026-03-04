@@ -55,8 +55,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MiniSocial ML Server",
-    description="Item-Based Collaborative Filtering Recommendation System",
-    version="1.0.0",
+    description="Hybrid Recommendation System: Item-Based Collaborative Filtering + Content-Based Filtering",
+    version="2.0.0",
     lifespan=lifespan,
 )
 

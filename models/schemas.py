@@ -33,7 +33,7 @@ class RecommendResponse(BaseModel):
     user_id: str
     recommendations: list[RecommendedPost]
     generated_at: datetime
-    source: str             # "collaborative" | "popular" | "tags" (cold start)
+    source: str             # "hybrid" | "popular" (cold start)
 
 
 class SimilarResponse(BaseModel):

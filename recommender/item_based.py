@@ -1,16 +1,22 @@
 """
 item_based.py
 ─────────────
-Nhân tố cốt lõi của hệ thống khuyến nghị Item-Based Collaborative Filtering.
+Nhân tố cốt lõi của hệ thống khuyến nghị Hybrid (Item-Based CF + Content-Based).
 
 Thuật toán:
   1. Đọc user_interactions → xây dựng User-Item Matrix (user × post, giá trị = tổng weight)
-  2. Tính Cosine Similarity giữa tất cả cặp post (item-item)
+  2. Tính Cosine Similarity giữa tất cả cặp post (item-item) → CF score
   3. Với mỗi user:
-       - Lấy danh sách post đã tương tác
-       - Tìm top-N post tương tự nhất (chưa tương tác)
-       - Xếp hạng theo điểm tổng = sum(similarity × weight)
+       a. CF:  score_cf  = sum(sim(interacted, candidate) × weight) cho từng bài chưa tương tác
+       b. CB:  score_cb  = dot(tag_profile_user, tag_vector_candidate)  [content_based.py]
+       c. Hybrid: final_score = score_cf + CONTENT_WEIGHT × score_cb
+       d. Reason: tag của bài được gợi ý có trọng số cao nhất trong tag profile user
   4. Ghi kết quả vào item_similarity và user_recommendations trong MongoDB
+
+Lợi ích của Hybrid:
+  - Cold-start: user chỉ cần 1 interaction → CB đã có thể gợi ý đúng chủ đề
+  - Diversity: CF + CB bổ sung lẫn nhau, tránh bị bias bởi behavior của user khác
+  - Reason chính xác: "Vì bạn thích #Health" thay vì tag ngẫu nhiên của bài nguồn
 """
 
 import os
@@ -26,6 +32,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
 from .data_loader import get_db, load_interactions, load_post_tags, load_popular_post_ids, load_user_tag_preferences
+from .content_based import build_tag_profile, compute_content_scores, get_best_matching_tag
 
 load_dotenv()
 
@@ -33,6 +40,8 @@ TOP_N_SIMILAR        = int(os.getenv("TOP_N_SIMILAR", 10))
 TOP_N_RECOMMENDATIONS = int(os.getenv("TOP_N_RECOMMENDATIONS", 20))
 MIN_INTERACTIONS     = int(os.getenv("MIN_INTERACTIONS", 2))
 RECOMMEND_EXPIRES_HOURS = 6
+# Trọng số Content-Based trong hybrid score: final = CF + CONTENT_WEIGHT * CB
+CONTENT_WEIGHT       = float(os.getenv("CONTENT_WEIGHT", "0.3"))
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +137,8 @@ async def train_and_save() -> dict:
         user_row        = matrix.loc[user_id]
         interacted_ids  = set(user_row[user_row > 0].index)
 
-        # Điểm tổng cho mỗi post chưa tương tác
-        # Also track best contributing source post per candidate
+        # CF: điểm tổng cho mỗi post chưa tương tác = sum(similarity × weight)
         candidate_scores: dict[str, float] = {}
-        candidate_best_source: dict[str, str] = {}   # candidate_pid → interacted_pid with highest contribution
-        candidate_best_contrib: dict[str, float] = {}  # candidate_pid → highest contribution so far
 
         for interacted_pid in interacted_ids:
             if interacted_pid not in sim_df.index:
@@ -142,42 +148,51 @@ async def train_and_save() -> dict:
             for candidate_pid, sim_score in sim_row.items():
                 if candidate_pid in interacted_ids:
                     continue
-                contrib = sim_score * w
                 candidate_scores[candidate_pid] = (
                     candidate_scores.get(candidate_pid, 0.0)
-                    + contrib
+                    + sim_score * w
                 )
-                # Track best source for reason_text
-                if contrib > candidate_best_contrib.get(candidate_pid, -1):
-                    candidate_best_contrib[candidate_pid] = contrib
-                    candidate_best_source[candidate_pid] = interacted_pid
 
-        if not candidate_scores:
+        # ── Content-Based scores ──────────────────────────────────────────────
+        user_interaction_map = {pid: float(user_row[pid]) for pid in interacted_ids}
+        cb_scores = compute_content_scores(user_interaction_map, post_tags, interacted_ids)
+
+        # ── Hybrid = CF + CONTENT_WEIGHT × CB ────────────────────────────────
+        all_candidate_ids = set(candidate_scores.keys()) | set(cb_scores.keys())
+        hybrid_scores: dict[str, float] = {
+            cid: candidate_scores.get(cid, 0.0) + CONTENT_WEIGHT * cb_scores.get(cid, 0.0)
+            for cid in all_candidate_ids
+        }
+
+        if not hybrid_scores:
             continue
 
-        # Top-N
+        # Top-N theo hybrid score
         top_candidates = sorted(
-            candidate_scores.items(), key=lambda x: x[1], reverse=True
+            hybrid_scores.items(), key=lambda x: x[1], reverse=True
         )[:TOP_N_RECOMMENDATIONS]
 
-        # Tính lý do gợi ý theo từng bài: tag nổi bật của bài tương tác đóng góp nhiều nhất
-        user_top_tags = await load_user_tag_preferences(user_id)
+        # Tag profile của user (dùng cho reason chính xác)
+        tag_profile = build_tag_profile(user_interaction_map, post_tags)
 
         for rank, (pid, score) in enumerate(top_candidates, start=1):
-            # Per-recommendation reason: find the top tag of the best-contributing source post
-            source_pid = candidate_best_source.get(pid)
-            if source_pid and source_pid in post_tags and post_tags[source_pid]:
-                # Use the first tag of the source post as reason
-                tag_slug = post_tags[source_pid][0]
-                reason_tag  = f"#{tag_slug.capitalize()}"
-                reason_text = f"Vì bạn thích {tag_slug.capitalize()}"
-            elif user_top_tags:
-                # Fallback to user's overall top tag
-                reason_tag  = f"#{user_top_tags[0].capitalize()}"
-                reason_text = f"Vì bạn thích {user_top_tags[0].capitalize()}"
+            # Reason = tag của bài được gợi ý có trọng số cao nhất trong profile user
+            # → phản ánh đúng "tại sao" bài này phù hợp với user
+            pid_tags = post_tags.get(pid, [])
+            best_tag = get_best_matching_tag(pid_tags, tag_profile)
+
+            if best_tag:
+                reason_tag  = f"#{best_tag.capitalize()}"
+                reason_text = f"Liên quan đến #{best_tag.capitalize()}"
             else:
-                reason_tag  = None
-                reason_text = "Dành cho bạn"
+                # Fallback: tag quan trọng nhất của user (bài không có tag chung)
+                top_user_tag = max(tag_profile, key=lambda t: tag_profile[t]) if tag_profile else None
+                if top_user_tag:
+                    reason_tag  = f"#{top_user_tag.capitalize()}"
+                    reason_text = f"Phù hợp với #{top_user_tag.capitalize()}"
+                else:
+                    reason_tag  = None
+                    reason_text = "Khám phá thêm"
             rec_docs.append({
                 "user_id":     user_id,
                 "post_id":     pid,
@@ -239,7 +254,7 @@ async def get_recommendations_for_user(user_id: str) -> dict:
             "user_id": user_id,
             "recommendations": filtered_recs,
             "generated_at": now,
-            "source": "collaborative",
+            "source": "hybrid",
         }
 
     # Cold start: trả về popular posts chưa xem
