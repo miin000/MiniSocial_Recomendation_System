@@ -62,6 +62,8 @@ acc2       2      3      0      0      0    ← chỉ like sport
 acc3       0      0      4      0      0    ← chỉ like tech
 acc4       3      2      0      2      0    ← like sport + news
 
+-> đề xuất news cho acc 1 và acc 2
+
 Cosine similarity giữa post1 và post2:
 
 sim(p1, p2) = 
