@@ -430,7 +430,8 @@ async def evaluate_model(k: int = 10) -> dict:
 
 async def get_similar_posts(post_id: str) -> dict:
     """
-    Lấy danh sách bài tương tự từ cache item_similarity.
+    Lấy danh sách bài tương tự từ cache item_similarity (CF-based).
+    Fallback về tag-overlap (Jaccard) khi bài chưa có interaction data.
     """
     db = get_db()
 
@@ -439,7 +440,33 @@ async def get_similar_posts(post_id: str) -> dict:
         {"_id": 0, "post_id_b": 1, "score": 1, "based_on": 1}
     ).sort("score", -1).limit(TOP_N_SIMILAR).to_list(length=None)
 
+    if docs:
+        return {
+            "post_id": post_id,
+            "similar_posts": docs,
+        }
+
+    # Fallback: content-based similarity using tag Jaccard overlap
+    post_tags = await load_post_tags()
+    query_tags = post_tags.get(post_id, [])
+
+    if not query_tags:
+        return {"post_id": post_id, "similar_posts": []}
+
+    query_set = set(query_tags)
+    scored = []
+    for pid, tags in post_tags.items():
+        if pid == post_id or not tags:
+            continue
+        pid_set = set(tags)
+        intersection = query_set & pid_set
+        if not intersection:
+            continue
+        jaccard = len(intersection) / len(query_set | pid_set)
+        scored.append({"post_id_b": pid, "score": round(jaccard, 6), "based_on": "tags"})
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
     return {
         "post_id": post_id,
-        "similar_posts": docs,
+        "similar_posts": scored[:TOP_N_SIMILAR],
     }
